@@ -4,7 +4,7 @@
 // Incrementing CACHE_VERSION will kick off the install event and force
 // previously cached resources to be updated from the network.
 /** @type {string} */
-const CACHE_VERSION = '1753607437|132260734245';
+const CACHE_VERSION = '1753822206|347031566215';
 /** @type {string} */
 const CACHE_PREFIX = 'Orchestrator-sw-cache-';
 const CACHE_NAME = CACHE_PREFIX + CACHE_VERSION;
