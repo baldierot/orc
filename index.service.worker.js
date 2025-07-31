@@ -4,7 +4,7 @@
 // Incrementing CACHE_VERSION will kick off the install event and force
 // previously cached resources to be updated from the network.
 /** @type {string} */
-const CACHE_VERSION = '1753822206|347031566215';
+const CACHE_VERSION = '1753997393|14230026359';
 /** @type {string} */
 const CACHE_PREFIX = 'Orchestrator-sw-cache-';
 const CACHE_NAME = CACHE_PREFIX + CACHE_VERSION;
@@ -42,9 +42,6 @@ self.addEventListener('activate', (event) => {
  * @returns {Response}
  */
 function ensureCrossOriginIsolationHeaders(response) {
-	if (!ENSURE_CROSSORIGIN_ISOLATION_HEADERS || !response) {
-		return response;
-	}
 	if (response.headers.get('Cross-Origin-Embedder-Policy') === 'require-corp'
 		&& response.headers.get('Cross-Origin-Opener-Policy') === 'same-origin') {
 		return response;
@@ -53,55 +50,41 @@ function ensureCrossOriginIsolationHeaders(response) {
 	const crossOriginIsolatedHeaders = new Headers(response.headers);
 	crossOriginIsolatedHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
 	crossOriginIsolatedHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
-	return new Response(response.body, {
+	const newResponse = new Response(response.body, {
 		status: response.status,
 		statusText: response.statusText,
 		headers: crossOriginIsolatedHeaders,
 	});
+
+	return newResponse;
 }
 
 /**
- * Fetches from the network, checks for updates using ETag, and falls back to the cache.
+ * Calls fetch and cache the result if it is cacheable
  * @param {FetchEvent} event
  * @param {Cache} cache
  * @param {boolean} isCacheable
- * @returns {Promise<Response>}
+ * @returns {Response}
  */
-async function networkFirstThenCache(event, cache, isCacheable) {
-	const cachedResponse = await cache.match(event.request);
-	const headers = {};
-	if (cachedResponse && cachedResponse.headers.has('etag')) {
-		headers['If-None-Match'] = cachedResponse.headers.get('etag');
+async function fetchAndCache(event, cache, isCacheable) {
+	// Use the preloaded response, if it's there
+	/** @type { Response } */
+	let response = await event.preloadResponse;
+	if (response == null) {
+		// Or, go over network.
+		response = await self.fetch(event.request);
 	}
 
-	try {
-		const networkResponse = await fetch(event.request, { headers });
-
-		if (networkResponse.status === 304) {
-			// The resource has not been modified.
-			return ensureCrossOriginIsolationHeaders(cachedResponse);
-		}
-
-		// The resource has been updated or is new.
-		if (isCacheable) {
-			const responseToCache = networkResponse.clone();
-			cache.put(event.request, responseToCache);
-		}
-		return ensureCrossOriginIsolationHeaders(networkResponse);
-	} catch (error) {
-		// Network request failed, probably offline.
-		console.error('Network error:', error);
-		if (cachedResponse) {
-			return ensureCrossOriginIsolationHeaders(cachedResponse);
-		}
-		if (event.request.mode === 'navigate') {
-			return caches.match(OFFLINE_URL);
-		}
-		return new Response('Network error', {
-			status: 408,
-			headers: { 'Content-Type': 'text/plain' },
-		});
+	if (ENSURE_CROSSORIGIN_ISOLATION_HEADERS) {
+		response = ensureCrossOriginIsolationHeaders(response);
 	}
+
+	if (isCacheable) {
+		// And update the cache
+		cache.put(event.request, response.clone());
+	}
+
+	return response;
 }
 
 self.addEventListener(
@@ -112,24 +95,52 @@ self.addEventListener(
 	 */
 	(event) => {
 		const isNavigate = event.request.mode === 'navigate';
-		const url = new URL(event.request.url);
-		const localPath = url.pathname.substring(url.pathname.lastIndexOf('/') + 1);
-		const isCacheable = FULL_CACHE.includes(localPath) || (isNavigate && localPath === '');
-
-		if (isCacheable) {
+		const url = event.request.url || '';
+		const referrer = event.request.referrer || '';
+		const base = referrer.slice(0, referrer.lastIndexOf('/') + 1);
+		const local = url.startsWith(base) ? url.replace(base, '') : '';
+		const isCacheable = FULL_CACHE.some((v) => v === local) || (base === referrer && base.endsWith(CACHED_FILES[0]));
+		if (isNavigate || isCacheable) {
 			event.respondWith((async () => {
+				// Try to use cache first
 				const cache = await caches.open(CACHE_NAME);
-				return networkFirstThenCache(event, cache, isCacheable);
+				if (isNavigate) {
+					// Check if we have full cache during HTML page request.
+					/** @type {Response[]} */
+					const fullCache = await Promise.all(FULL_CACHE.map((name) => cache.match(name)));
+					const missing = fullCache.some((v) => v === undefined);
+					if (missing) {
+						try {
+							// Try network if some cached file is missing (so we can display offline page in case).
+							const response = await fetchAndCache(event, cache, isCacheable);
+							return response;
+						} catch (e) {
+							// And return the hopefully always cached offline page in case of network failure.
+							console.error('Network error: ', e); // eslint-disable-line no-console
+							return caches.match(OFFLINE_URL);
+						}
+					}
+				}
+				let cached = await cache.match(event.request);
+				if (cached != null) {
+					if (ENSURE_CROSSORIGIN_ISOLATION_HEADERS) {
+						cached = ensureCrossOriginIsolationHeaders(cached);
+					}
+					return cached;
+				}
+				// Try network if don't have it in cache.
+				const response = await fetchAndCache(event, cache, isCacheable);
+				return response;
 			})());
 		} else if (ENSURE_CROSSORIGIN_ISOLATION_HEADERS) {
 			event.respondWith((async () => {
-				const response = await fetch(event.request);
-				return ensureCrossOriginIsolationHeaders(response);
+				let response = await fetch(event.request);
+				response = ensureCrossOriginIsolationHeaders(response);
+				return response;
 			})());
 		}
 	}
 );
-
 
 self.addEventListener('message', (event) => {
 	// No cross origin
@@ -152,3 +163,4 @@ self.addEventListener('message', (event) => {
 		}
 	});
 });
+
